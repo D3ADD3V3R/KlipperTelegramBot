@@ -23,6 +23,9 @@ MACRO_STATE='not configured'
 CLI_STATE='not configured'
 CONFIG_STATE='not created'
 TOKEN_STATE='not configured'
+RESTART_KLIPPER=false
+RESTART_MOONRAKER=false
+RESTART_TELEGRAM=false
 
 info()    { printf '  [INFO] %s\n' "$*"; }
 ok()      { printf '  [ OK ] %s\n' "$*"; }
@@ -132,6 +135,7 @@ if [[ -f "$MACROS_FILE" ]]; then
   MACRO_STATE='existing file retained'
 elif ask 'Install TELEGRAM_PAIRING_CREATE and TELEGRAM_STATUS macros?'; then
   cp "$ROOT/examples/telegram_macros.cfg" "$MACROS_FILE"
+  RESTART_KLIPPER=true
   ok "Installed macros: $MACROS_FILE"
   MACRO_STATE='installed'
 else
@@ -142,9 +146,11 @@ if [[ -f "$MACROS_FILE" && -f "$KLIPPER_CONF" ]]; then
     info 'Checking existing include position (and repairing if necessary).'
     result="$(python3 "$ROOT/scripts/update_klipper_include.py" ensure "$KLIPPER_CONF")"
     ok "Klipper include verified: $result"
+    [[ "$result" != unchanged ]] && RESTART_KLIPPER=true
   elif ask 'Add [include telegram_macros.cfg] to printer.cfg before SAVE_CONFIG?'; then
     result="$(python3 "$ROOT/scripts/update_klipper_include.py" ensure "$KLIPPER_CONF")"
     ok "Klipper include installed: $result; RESTART required."
+    RESTART_KLIPPER=true
   else
     warn 'Macro file exists but is not included automatically. Add the include manually when ready.'
   fi
@@ -182,15 +188,9 @@ sudo systemctl daemon-reload
 info 'Enabling service on boot.'
 sudo systemctl enable "$SERVICE"
 if [[ -f "$CONFIG_FILE" ]]; then
-  info 'Starting/restarting Klipper Telegram service.'
-  sudo systemctl restart "$SERVICE"
-  if systemctl is-active --quiet "$SERVICE"; then
-    ok 'Service is active.'
-    SERVICE_STATE='active'
-  else
-    warn 'Service did not reach active state. Inspect journalctl -u klipper-telegram -n 100.'
-    SERVICE_STATE='failed/inactive'
-  fi
+  info 'Service installed; start/restart deferred until final confirmation.'
+  RESTART_TELEGRAM=true
+  SERVICE_STATE='enabled; restart pending'
 else
   warn 'Service enabled but not started because configuration does not exist.'
   SERVICE_STATE='enabled only'
@@ -236,6 +236,8 @@ managed_services: klipper-telegram
 EOF
           ok 'Update Manager configuration appended (backup created).'
           UPDATE_STATE='configured; restart Moonraker'
+        RESTART_MOONRAKER=true
+          RESTART_MOONRAKER=true
           ;;
         *) warn 'Git origin does not match expected public GitHub repository; skipping new Update Manager entry.' ;;
       esac
@@ -250,17 +252,11 @@ EOF
         printf '%s\n' 'klipper-telegram' >> "$ASVC"
         ok 'Added klipper-telegram to moonraker.asvc (backup created).'
         UPDATE_STATE='configured; restart Moonraker'
+        RESTART_MOONRAKER=true
       else
         ok 'Service authorization in moonraker.asvc already present.'
       fi
-      info 'Moonraker must restart to display a newly installed Update Manager component.'
-      if ask 'Restart Moonraker now to refresh Update Manager?'; then
-        sudo systemctl restart moonraker
-        ok 'Moonraker restarted.'
-        UPDATE_STATE='configured; Moonraker restarted'
-      else
-        warn 'Moonraker restart deferred. Update Manager may not show until restarted.'
-      fi
+      info 'Moonraker restart will be offered at installation end.'
       info 'If still absent, inspect: journalctl -u moonraker -n 80 --no-pager'
     fi
   fi
@@ -280,11 +276,31 @@ printf '\nNext commands:\n'
 printf '  systemctl status klipper-telegram --no-pager\n'
 printf '  journalctl -u klipper-telegram -n 50 --no-pager\n'
 printf '  klipper-telegram --help\n'
-printf '  curl -fsS http://127.0.0.1:7125/server/update/status\n'
+printf '  curl -fsS http://127.0.0.1:7125/machine/update/status\n'
 if [[ "$UPDATE_STATE" == *'restart Moonraker'* || "$UPDATE_STATE" == 'already configured; verify Moonraker reload' ]]; then
   info 'Restart Moonraker to load the new Update Manager configuration.'
 fi
 if [[ "$MACRO_STATE" != 'not configured' ]]; then
   info 'Run RESTART in the Mainsail console after the macro include is in printer.cfg.'
 fi
-ok 'Installer finished. Verify the service and Telegram credentials before use.'
+printf '\nAffected services: Klipper=%s Moonraker=%s Telegram=%s\n' "$RESTART_KLIPPER" "$RESTART_MOONRAKER" "$RESTART_TELEGRAM"
+if [[ "$RESTART_KLIPPER" == true || "$RESTART_MOONRAKER" == true || "$RESTART_TELEGRAM" == true ]]; then
+  # A running/paused print is never interrupted by installer restarts.
+  PRINT_STATE="$(curl -fsS --max-time 5 http://127.0.0.1:7125/printer/objects/query?print_stats 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("result",{}).get("status",{}).get("print_stats",{}).get("state","unknown"))' 2>/dev/null || echo unknown)"
+  if [[ "$PRINT_STATE" == printing || "$PRINT_STATE" == paused || "$PRINT_STATE" == unknown ]]; then
+    warn "Not restarting services: printer state is $PRINT_STATE; restart manually after checking the printer."
+  elif ask 'Restart affected services now?'; then
+    if [[ "$RESTART_MOONRAKER" == true ]]; then
+      sudo systemctl restart moonraker && ok 'Moonraker restarted'
+    fi
+    if [[ "$RESTART_KLIPPER" == true ]]; then
+      sudo systemctl restart klipper && ok 'Klipper restarted'
+    fi
+    if [[ "$RESTART_TELEGRAM" == true ]]; then
+      sudo systemctl restart klipper-telegram && ok 'Telegram service restarted'
+    fi
+  else
+    warn 'Service restarts deferred by user.'
+  fi
+fi
+ok 'Installer finished. Verify service and Telegram credentials before use.' 

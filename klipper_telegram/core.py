@@ -14,7 +14,7 @@ def load_config(path):
 def render(template, values):
     # Only known placeholders are replaced; no arbitrary Python expressions.
     import re
-    return re.sub(r'\{(filename|printer|state|progress|error|user|code|bot)\}',
+    return re.sub(r'\{(filename|printer|state|progress|error|user|code|bot|camera_name)\}',
                   lambda m: str(values.get(m.group(1), '')), template)
 
 
