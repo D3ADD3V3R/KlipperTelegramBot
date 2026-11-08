@@ -9,7 +9,7 @@ import aiohttp
 from .core import Store, load_config, render
 
 LOG = logging.getLogger('klipper-telegram')
-VERSION = '0.1.0'
+VERSION = '0.2.0'
 
 
 class Service:
@@ -78,6 +78,10 @@ class Service:
         return render(template.strip().strip('\"'), {'printer':self.printer, 'bot':self.bot_name, **(values or {})})
 
     async def pairing_created(self):
+        if not self.store.consume_console_arm():
+            await self.console('Telegram pairing DENIED: authorize locally using klipper-telegram pairing arm')
+            LOG.warning('Console pairing request denied: no valid local authorization')
+            return
         code, _ = self.store.generate(self.cfg.getint('pairing','expiration_seconds',fallback=600))
         text = self.pair_console_template('created', 'Telegram pairing code: {code}; bot @{bot}', {'code':code, 'bot':self.bot_name or 'unknown'})
         if text: await self.console(text)
@@ -205,7 +209,7 @@ class Service:
                 async with self.session.ws_connect(url,headers=self.headers(),heartbeat=20) as ws:
                     self.ws=ws
                     await self.rpc('server.connection.identify',{'client_name':'klipper-telegram',
-                        'version':VERSION,'type':'agent','url':'https://gitlab.com/'})
+                        'version':VERSION,'type':'agent','url':'https://github.com/D3ADD3V3R/KlipperTelegramBot'})
                     await self.rpc('connection.register_remote_method',{'method_name':'klipper_telegram_pairing_create'})
                     await self.rpc('connection.register_remote_method',{'method_name':'klipper_telegram_status'})
                     await self.rpc('printer.objects.subscribe', {'objects':{'print_stats':None,'display_status':['progress']}},await_result=False)

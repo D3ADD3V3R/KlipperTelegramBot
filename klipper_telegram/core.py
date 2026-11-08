@@ -49,12 +49,28 @@ class Store:
     def identity(self):
         return self.db.execute("SELECT value FROM metadata WHERE key='printer_id'").fetchone()[0]
 
+    def arm_console(self, ttl=60):
+        """Permit exactly one console-triggered pairing request for a short period."""
+        if not 1 <= ttl <= 300:
+            raise ValueError('Arm duration must be 1-300 seconds')
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES ('console_arm_until', ?)",
+                            (str(time.time() + ttl),))
+
+    def consume_console_arm(self):
+        """Atomically consume a short-lived authorization; deny by default."""
+        with self.db:
+            row = self.db.execute("SELECT value FROM metadata WHERE key='console_arm_until'").fetchone()
+            self.db.execute("DELETE FROM metadata WHERE key='console_arm_until'")
+            return bool(row and float(row['value']) > time.time())
+
     def generate(self, ttl=600):
         code = ''.join(secrets.choice(ALPHABET) for _ in range(8))
         code = code[:4] + '-' + code[4:]
         now = time.time()
         with self.db:
             self.db.execute("UPDATE pairings SET state='replaced' WHERE state='pending'")
+            self.db.execute("DELETE FROM metadata WHERE key='pairing_failures'")
             self.db.execute('INSERT INTO pairings(digest,expires,state,created) VALUES (?,?,?,?)',
                             (hashlib.sha256(code.encode()).hexdigest(), now+ttl, 'pending', now))
         return code, now+ttl
@@ -83,9 +99,16 @@ class Store:
             else:
                 self.db.execute('UPDATE attempts SET count=count+1 WHERE user_id=?',(user_id,))
             p = self.current()
+            # A shared attempt budget prevents unlimited guesses from rotating Telegram accounts.
+            if p:
+                count = self.db.execute("SELECT value FROM metadata WHERE key='pairing_failures'").fetchone()
+                if count and int(count['value']) >= 30:
+                    return False, 'rate_limited'
             if not p or p['expires'] <= now:
                 return False, 'expired'
             if not hmac.compare_digest(p['digest'], hashlib.sha256(code.encode()).hexdigest()):
+                self.db.execute("INSERT INTO metadata(key,value) VALUES('pairing_failures','1') "
+                                "ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1")
                 return False, 'invalid'
             changed = self.db.execute("UPDATE pairings SET state='used', user_id=?, username=? WHERE id=? AND state='pending' AND expires>?",
                                       (user_id,username,p['id'],now)).rowcount

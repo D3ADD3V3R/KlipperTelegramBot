@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "${EUID}" -eq 0 ]]; then echo 'Run make install as the Klipper user, NOT root.' >&2; exit 1; fi
+if [[ "${EUID}" -eq 0 ]]; then
+  printf 'ERROR: Run make install as your normal Klipper user, not with sudo.\n' >&2
+  exit 1
+fi
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PRINTER_DATA="${PRINTER_DATA:-$HOME/printer_data}"
 CONFIG_DIR="$PRINTER_DATA/config"
@@ -12,49 +16,120 @@ KLIPPER_CONF="$CONFIG_DIR/printer.cfg"
 MACROS_FILE="$CONFIG_DIR/telegram_macros.cfg"
 VENV="${VENV:-$HOME/klipper-telegram-env}"
 SERVICE='klipper-telegram.service'
+STEPS=7
+SERVICE_STATE='not installed'
+UPDATE_STATE='not configured'
+MACRO_STATE='not configured'
+CONFIG_STATE='not created'
+TOKEN_STATE='not configured'
 
+info()    { printf '  [INFO] %s\n' "$*"; }
+ok()      { printf '  [ OK ] %s\n' "$*"; }
+warn()    { printf '  [WARN] %s\n' "$*" >&2; }
+section() { printf '\n============================================================\n[%s/%s] %s\n============================================================\n' "$1" "$STEPS" "$2"; }
 ask() {
- local ans
- read -r -p "$1 [Y/n] " ans || true
- [[ ! "$ans" =~ ^[Nn]$ ]]
+  local ans
+  if [[ ! -t 0 ]]; then
+    warn "No interactive terminal: defaulting to No for: $1"
+    return 1
+  fi
+  read -r -p "  $1 [Y/n] " ans || ans=n
+  [[ ! "$ans" =~ ^[Nn]$ ]]
 }
 
+trap 'warn "Installation stopped at line $LINENO (exit code $?). See the output above."' ERR
+printf '\nKlipper Telegram Bot - interactive installer\n'
+info "User: $(id -un) (uid=$(id -u))"
+info "Repository: $ROOT"
+info "Config location: $CONFIG_DIR"
+info "Python environment: $VENV"
+info 'Existing configuration, token, and database files will be preserved.'
+
+section 1 'Checking prerequisites and installation paths'
+for bin in python3 sudo systemctl git; do
+  if command -v "$bin" >/dev/null 2>&1; then
+    ok "$bin: $(command -v "$bin")"
+  else
+    warn "Required command not found: $bin"
+    exit 1
+  fi
+done
+[[ -f "$ROOT/requirements.txt" ]] || { warn 'requirements.txt not found'; exit 1; }
+[[ -f "$ROOT/examples/klipper_telegram.conf" ]] || { warn 'Example config not found'; exit 1; }
 mkdir -p "$CONFIG_DIR"
-echo 'Klipper Telegram - installer'
-echo "Repository: $ROOT"
-echo "User: $(id -un)"
-python3 -m venv "$VENV"
-"$VENV/bin/python" -m pip install --upgrade pip
-"$VENV/bin/python" -m pip install -r "$ROOT/requirements.txt"
+ok "Configuration directory ready: $CONFIG_DIR"
 
-if [[ ! -e "$CONFIG_FILE" ]] && ask 'Create default configuration?'; then
-  cp "$ROOT/examples/klipper_telegram.conf" "$CONFIG_FILE"
-  chmod 600 "$CONFIG_FILE"
-  echo "Config: $CONFIG_FILE"
+section 2 'Creating Python environment and installing dependencies'
+if [[ -x "$VENV/bin/python" ]]; then
+  info 'Existing virtual environment found; updating packages.'
 else
-  echo 'Existing configuration preserved (or opted out).'
+  info 'Creating isolated Python virtual environment.'
+  python3 -m venv "$VENV" || { warn 'Could not create venv; install python3-venv and retry'; exit 1; }
 fi
+info 'Upgrading pip (package installation output follows).'
+"$VENV/bin/python" -m pip install --upgrade pip
+info 'Installing application dependencies (package installation output follows).'
+"$VENV/bin/python" -m pip install -r "$ROOT/requirements.txt"
+ok 'Python environment and dependencies ready.'
 
-if [[ ! -e "$TOKEN_FILE" ]] && ask 'Configure a BotFather token now?'; then
-  read -r -s -p 'Bot token (not echoed): ' BOT_TOKEN; echo
+section 3 'Preparing local configuration and Telegram credentials'
+if [[ -f "$CONFIG_FILE" ]]; then
+  ok "Existing configuration preserved: $CONFIG_FILE"
+  CONFIG_STATE='existing file retained'
+elif ask 'Create example klipper_telegram.conf?'; then
+  (umask 077; cp "$ROOT/examples/klipper_telegram.conf" "$CONFIG_FILE")
+  chmod 600 "$CONFIG_FILE"
+  ok "Created: $CONFIG_FILE (permissions 600)"
+  CONFIG_STATE='created'
+else
+  warn 'Configuration not created. Service will be registered but cannot run until configured.'
+fi
+if [[ -e "$TOKEN_FILE" ]]; then
+  ok 'Existing Telegram token file preserved (token not displayed).'
+  TOKEN_STATE='existing file retained'
+elif ask 'Enter a BotFather token now?'; then
+  read -r -s -p '  Bot token (hidden): ' BOT_TOKEN || BOT_TOKEN=''
+  printf '\n'
   if [[ -n "$BOT_TOKEN" ]]; then
     (umask 077; printf '%s\n' "$BOT_TOKEN" > "$TOKEN_FILE")
-    echo "Token saved to $TOKEN_FILE"
+    chmod 600 "$TOKEN_FILE"
+    ok "Token stored at $TOKEN_FILE (permissions 600)"
+    TOKEN_STATE='created'
+  else
+    warn 'Empty token: skipped.'
   fi
   unset BOT_TOKEN
+else
+  info 'Token entry skipped. You can configure it later.'
 fi
 
-if [[ ! -e "$MACROS_FILE" ]] && ask 'Install optional Klipper G-Code macros?'; then
+section 4 'Installing optional Klipper G-Code macros'
+if [[ -f "$MACROS_FILE" ]]; then
+  ok "Existing macros preserved: $MACROS_FILE"
+  MACRO_STATE='existing file retained'
+elif ask 'Install TELEGRAM_PAIRING_CREATE and TELEGRAM_STATUS macros?'; then
   cp "$ROOT/examples/telegram_macros.cfg" "$MACROS_FILE"
-  if [[ -f "$KLIPPER_CONF" ]] && ! grep -Fqx '[include telegram_macros.cfg]' "$KLIPPER_CONF"; then
-    if ask 'Add include to printer.cfg?'; then
-      printf '\n[include telegram_macros.cfg]\n' >> "$KLIPPER_CONF"
-    fi
+  ok "Installed macros: $MACROS_FILE"
+  MACRO_STATE='installed'
+else
+  info 'Macro installation skipped.'
+fi
+if [[ -f "$MACROS_FILE" && -f "$KLIPPER_CONF" ]]; then
+  if grep -Eq '^[[:space:]]*\[include[[:space:]]+telegram_macros\.cfg\][[:space:]]*$' "$KLIPPER_CONF"; then
+    ok 'printer.cfg already includes telegram_macros.cfg.'
+  elif ask 'Add [include telegram_macros.cfg] to printer.cfg?'; then
+    printf '\n[include telegram_macros.cfg]\n' >> "$KLIPPER_CONF"
+    ok 'Include added to printer.cfg. Klipper RESTART is required.'
+  else
+    warn 'Macro file exists but is not included automatically. Add the include manually when ready.'
   fi
-  echo 'Note: Restart Klipper to load installed macros.'
+elif [[ -f "$MACROS_FILE" ]]; then
+  warn "printer.cfg not found at $KLIPPER_CONF; add include manually."
 fi
 
+section 5 'Registering the systemd service'
 UNIT="$(mktemp)"
+trap 'rm -f "${UNIT:-}"' EXIT
 cat > "$UNIT" <<EOF
 [Unit]
 Description=Klipper Telegram notification agent
@@ -75,46 +150,81 @@ NoNewPrivileges=yes
 [Install]
 WantedBy=multi-user.target
 EOF
+info "Installing /etc/systemd/system/$SERVICE (sudo may ask for your password)."
 sudo install -m 644 "$UNIT" "/etc/systemd/system/$SERVICE"
-rm -f "$UNIT"
+info 'Reloading systemd unit definitions.'
 sudo systemctl daemon-reload
+info 'Enabling service on boot.'
 sudo systemctl enable "$SERVICE"
 if [[ -f "$CONFIG_FILE" ]]; then
+  info 'Starting/restarting Klipper Telegram service.'
   sudo systemctl restart "$SERVICE"
+  if systemctl is-active --quiet "$SERVICE"; then
+    ok 'Service is active.'
+    SERVICE_STATE='active'
+  else
+    warn 'Service did not reach active state. Inspect journalctl -u klipper-telegram -n 100.'
+    SERVICE_STATE='failed/inactive'
+  fi
 else
-  echo 'No configuration found: service is registered but not started.'
+  warn 'Service enabled but not started because configuration does not exist.'
+  SERVICE_STATE='enabled only'
 fi
 
+section 6 'Optional Moonraker Update Manager integration'
 if ask 'Configure Moonraker Update Manager?'; then
   if [[ ! -d "$ROOT/.git" ]]; then
-    echo 'Not a git clone: skipping update manager (git_repo needs a git checkout).'
+    warn 'Skipping: installation folder is not a Git checkout.'
   elif [[ ! -f "$MOONRAKER_CONF" ]]; then
-    echo 'moonraker.conf missing; update manager not configured.'
-  elif grep -Eq '^\[update_manager klipper-telegram\]' "$MOONRAKER_CONF"; then
-    echo 'Existing update manager section preserved.'
+    warn "Skipping: $MOONRAKER_CONF does not exist."
+  elif grep -Eq '^[[:space:]]*\[update_manager klipper-telegram\][[:space:]]*$' "$MOONRAKER_CONF"; then
+    ok 'Existing [update_manager klipper-telegram] section preserved.'
+    UPDATE_STATE='already configured'
   else
     ORIGIN="$(git -C "$ROOT" remote get-url origin 2>/dev/null || true)"
-    if [[ "$ORIGIN" =~ ^https://gitlab\.com/[^[:space:]]+\.git$ || "$ORIGIN" =~ ^https://gitlab\.com/[^[:space:]]+$ ]]; then
-      cat >> "$MOONRAKER_CONF" <<EOF
+    info "Detected Git remote: ${ORIGIN:-none}"
+    case "$ORIGIN" in
+      https://github.com/D3ADD3V3R/KlipperTelegramBot|https://github.com/D3ADD3V3R/KlipperTelegramBot.git|git@github.com:D3ADD3V3R/KlipperTelegramBot.git)
+        cat >> "$MOONRAKER_CONF" <<EOF
 
 [update_manager klipper-telegram]
 type: git_repo
 path: $ROOT
 origin: $ORIGIN
 primary_branch: main
+channel: dev
 virtualenv: $VENV
 requirements: requirements.txt
 managed_services: klipper-telegram
 EOF
-      ASVC="$PRINTER_DATA/moonraker.asvc"
-      touch "$ASVC"
-      grep -Fxq 'klipper-telegram' "$ASVC" || echo 'klipper-telegram' >> "$ASVC"
-      echo "Update manager configured. Restart Moonraker to activate."
-    else
-      echo 'Update manager skipped: set a real public HTTPS GitLab origin and rerun installer.'
-    fi
+        ASVC="$PRINTER_DATA/moonraker.asvc"
+        touch "$ASVC"
+        grep -Fxq 'klipper-telegram' "$ASVC" || printf '%s\n' 'klipper-telegram' >> "$ASVC"
+        ok "Added Update Manager entry to $MOONRAKER_CONF"
+        ok "Service authorization ensured in $ASVC"
+        UPDATE_STATE='configured; Moonraker restart needed'
+        ;;
+      *) warn 'Skipping: remote does not match official repository. No existing files modified.' ;;
+    esac
   fi
+else
+  info 'Moonraker Update Manager setup skipped by user.'
 fi
 
-echo 'Completed. Check: systemctl status klipper-telegram'
-echo 'Logs: journalctl -u klipper-telegram -f'
+section 7 'Installation summary'
+printf '  Repository:        %s\n' "$ROOT"
+printf '  Configuration:     %s\n' "$CONFIG_STATE"
+printf '  Telegram token:    %s\n' "$TOKEN_STATE"
+printf '  Klipper macros:    %s\n' "$MACRO_STATE"
+printf '  Service:           %s\n' "$SERVICE_STATE"
+printf '  Update Manager:    %s\n' "$UPDATE_STATE"
+printf '\nNext commands:\n'
+printf '  systemctl status klipper-telegram --no-pager\n'
+printf '  journalctl -u klipper-telegram -n 50 --no-pager\n'
+if [[ "$UPDATE_STATE" == 'configured; Moonraker restart needed' ]]; then
+  info 'Restart Moonraker to load the new Update Manager configuration.'
+fi
+if [[ "$MACRO_STATE" != 'not configured' ]]; then
+  info 'Run RESTART in the Mainsail console after the macro include is in printer.cfg.'
+fi
+ok 'Installer finished. Verify the service and Telegram credentials before use.'

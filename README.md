@@ -1,4 +1,4 @@
-# Klipper Telegram · v0.1.0 (preview)
+# Klipper Telegram · v0.2.0 (preview)
 
 Small read-only Telegram notification service for Moonraker / Klipper, with user pairing and a local systemd service.
 
@@ -20,14 +20,14 @@ Linux with Python 3, python3-venv, systemd, Moonraker and Klipper, `make`, `git`
 
 ## Install
 
-Clone your GitLab repository into the printer user's home folder, then:
+Clone the public GitHub repository into the printer user's home folder, then:
 
 ```bash
 cd ~/klipper-telegram
 make install
 ```
 
-The installer asks whether to create the default `.conf`, add the Telegram token, install G-Code macros and configure the Moonraker `git_repo` update manager. A real public GitLab HTTPS `origin` must already be present for update-manager setup. It registers and enables a `klipper-telegram` systemd service. Re-running the installer preserves local configuration files.
+The installer prints seven numbered phases, reports each action and skip, shows the systemd service state, and finishes with an installation summary. It asks whether to create the default `.conf`, add the Telegram token, install G-Code macros and configure the Moonraker `git_repo` update manager. The public GitHub `origin` must already be present for update-manager setup. It registers and enables a `klipper-telegram` systemd service. Re-running the installer preserves local configuration files.
 
 **Do not run `sudo make install`.** The installer only elevates the systemd unit registration. Dependencies install into `~/klipper-telegram-env`.
 
@@ -44,7 +44,7 @@ Setup files:
 1. Create a bot using Telegram BotFather and set its token in the installer or the token file.
 2. Run `sudo systemctl restart klipper-telegram`.
 3. Restart Klipper if you added `telegram_macros.cfg`.
-4. Run `TELEGRAM_PAIRING_CREATE` from Mainsail's console.
+4. On the printer host, run `~/klipper-telegram-env/bin/python -m klipper_telegram --config ~/printer_data/config/klipper_telegram.conf pairing arm` from the repository directory (or `PYTHONPATH` pointing to it). Within 60 seconds run `TELEGRAM_PAIRING_CREATE` from Mainsail. The authorization is single-use.
 5. In a **private** chat with the bot, run `/subscribe ABCD-EFGH` replacing the code.
 6. The console should report `Connected to Telegram-User @username` or `User <id>`.
 7. Run `TELEGRAM_STATUS` to see connection/subscriber information.
@@ -66,6 +66,14 @@ Pairing codes are hashed before storage, single-use and rate-limited per Telegra
 - If Moonraker is down when pairing expires, the console message is not retried; the code still expires.
 - Standard Telegram Bot API long-polling: **do not configure a webhook for the same bot**.
 - Moonraker must allow localhost requests (trusted clients) or configure an API key.
+
+## Updating via Moonraker
+
+Clone using `git clone https://github.com/D3ADD3V3R/KlipperTelegramBot.git` and run `make install`; choose Update Manager registration. Moonraker manages the Git repository and the `klipper-telegram` service, while credentials and SQLite remain under `~/printer_data/config/`. The `dev` channel tracks the latest commit on `main`; create a semantic version tag such as `v0.2.0` before switching to stable releases.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
 
 ## Development
 
