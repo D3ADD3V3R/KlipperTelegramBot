@@ -80,3 +80,13 @@ MIT. See [LICENSE](LICENSE).
 ```bash
 make test
 ```
+
+## Uninstall
+
+Run from the repository as the ordinary printer user (do not use `sudo make uninstall`):
+
+```bash
+make uninstall
+```
+
+The interactive uninstaller stops/disables/removes the `klipper-telegram` systemd unit. It optionally removes Klipper macros, the Moonraker Update Manager entry and `moonraker.asvc` authorization, and the dedicated Python virtual environment. **Configuration, BotFather token, subscriber database and Git repository are preserved by default.** Existing configuration files are backed up before modification. If you remove Moonraker or Klipper integrations, restart the corresponding service afterward.
