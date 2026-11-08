@@ -43,7 +43,7 @@ info "User: $(id -un) (uid=$(id -u))"
 info "Repository: $ROOT"
 info "Config location: $CONFIG_DIR"
 info "Python environment: $VENV"
-info 'Existing configuration, token, and database files will be preserved.'
+info 'Existing configuration and token will be preserved; legacy subscribers.db is import-only.'
 
 section 1 'Checking prerequisites and installation paths'
 for bin in python3 sudo systemctl git; do
@@ -143,7 +143,7 @@ WorkingDirectory=$ROOT
 Environment=PYTHONPATH=$ROOT
 ExecStart=$VENV/bin/python -m klipper_telegram --config $CONFIG_FILE serve
 Restart=always
-RestartSec=5
+RestartSec=20
 UMask=0077
 NoNewPrivileges=yes
 

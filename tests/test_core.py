@@ -1,33 +1,55 @@
-import tempfile
+import asyncio
 import unittest
-from pathlib import Path
-from unittest.mock import patch
-from klipper_telegram.core import Store, render
+from klipper_telegram.core import render
+from klipper_telegram.store import MoonrakerStore
 
-class PairingTests(unittest.TestCase):
-    def test_pair_once(self):
-        with tempfile.TemporaryDirectory() as temp:
-            s=Store(Path(temp)/'store.db')
-            code,_=s.generate(600)
-            self.assertTrue(s.claim(code,42,42,'someone')[0])
-            self.assertFalse(s.claim(code,43,43,'another')[0])
-            self.assertTrue(s.is_subscribed(42,42))
-            self.assertFalse(s.is_subscribed(42,99))
-            self.assertTrue(s.unsubscribe(42))
-            self.assertFalse(s.is_subscribed(42,42))
 
-    def test_replacement_and_expiration(self):
-        with tempfile.TemporaryDirectory() as temp:
-            s=Store(Path(temp)/'store.db')
-            a,_=s.generate(600)
-            b,_=s.generate(600)
-            self.assertFalse(s.claim(a,1,1,'a')[0])
-            self.assertTrue(s.claim(b,2,2,'b')[0])
-            c,_=s.generate(-1)
-            self.assertEqual(s.expire(),1)
-            self.assertFalse(s.claim(c,3,3,'c')[0])
+class MemoryStore(MoonrakerStore):
+    def __init__(self):
+        super().__init__('http://localhost:7125')
+        self.data = {}
 
-    def test_template_whitelist(self):
-        self.assertEqual(render('Hello {user} {unknown}',{'user':'@test'}),'Hello @test {unknown}')
+    async def get(self, key, default=None):
+        return self.data.get(key, default)
 
-if __name__ == '__main__': unittest.main()
+    async def put(self, key, value):
+        self.data[key] = value
+
+    async def delete(self, key):
+        return self.data.pop(key, None)
+
+
+class PairingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pair_once(self):
+        store = MemoryStore()
+        code, _ = await store.generate(600)
+        self.assertTrue((await store.claim(code, 42, 42, 'test'))[0])
+        self.assertFalse((await store.claim(code, 43, 43, 'test2'))[0])
+        self.assertTrue(await store.is_subscribed(42, 42))
+        self.assertFalse(await store.is_subscribed(42, 99))
+        self.assertTrue(await store.unsubscribe(42))
+        self.assertFalse(await store.is_subscribed(42, 42))
+
+    async def test_replacement_and_expiration(self):
+        store = MemoryStore()
+        old, _ = await store.generate(600)
+        new, _ = await store.generate(600)
+        self.assertFalse((await store.claim(old, 1, 1, 'a'))[0])
+        self.assertTrue((await store.claim(new, 2, 2, 'b'))[0])
+        third, _ = await store.generate(600)
+        store.data['pairing']['expires'] = 0
+        self.assertEqual(await store.expire(), 1)
+        self.assertEqual(await store.expire(), 0)
+        self.assertFalse((await store.claim(third, 3, 3, 'c'))[0])
+
+    async def test_identity_persistent(self):
+        store = MemoryStore()
+        self.assertEqual(await store.identity(), await store.identity())
+
+    async def test_template_whitelist(self):
+        self.assertEqual(render('Hello {user} {unknown}', {'user': '@test'}),
+                         'Hello @test {unknown}')
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -2,7 +2,8 @@ import argparse
 import asyncio
 import logging
 from pathlib import Path
-from .core import Store, load_config
+from .core import load_config
+from .store import MoonrakerStore
 from .service import Service
 
 
@@ -21,15 +22,18 @@ def main():
         logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s %(name)s: %(message)s')
         asyncio.run(Service(args.config).run())
     else:
-        store=Store(str(Path(args.config).expanduser().parent/'subscribers.db'))
-        if args.command=='pairing' and args.action=='arm':
-            store.arm_console(args.seconds)
-            print(f'Console pairing armed for {args.seconds} seconds. Run TELEGRAM_PAIRING_CREATE once in Mainsail.')
-        elif args.command=='pairing':
-            code,expiry=store.generate(cfg.getint('pairing','expiration_seconds',fallback=600))
-            print(f'Printer: {cfg.get("general","printer_name",fallback="Printer")}\nPairing code: {code}\nExpires in: {cfg.getint("pairing","expiration_seconds",fallback=600)} seconds')
-            print('NOTE: CLI pairing does not notify a running daemon until expiry. Prefer TELEGRAM_PAIRING_CREATE in Mainsail.')
-        else:
-            print(f'Printer UUID: {store.identity()}\nSubscribers: {len(store.subscribers())}')
+        async def cli():
+            url=cfg.get('moonraker','url',fallback='http://127.0.0.1:7125')
+            key=cfg.get('moonraker','api_key',fallback='').strip()
+            async with MoonrakerStore(url,key) as store:
+                if args.command=='pairing' and args.action=='arm':
+                    await store.arm_console(args.seconds)
+                    print(f'Console pairing armed for {args.seconds} seconds. Run TELEGRAM_PAIRING_CREATE once in Mainsail.')
+                elif args.command=='pairing':
+                    code,expiry=await store.generate(cfg.getint('pairing','expiration_seconds',fallback=600))
+                    print(f'Printer: {cfg.get("general","printer_name",fallback="Printer")}\nPairing code: {code}\nExpires in: {cfg.getint("pairing","expiration_seconds",fallback=600)} seconds')
+                else:
+                    print(f'Printer UUID: {await store.identity()}\nSubscribers: {len(await store.subscribers())}')
+        asyncio.run(cli())
 
 if __name__=='__main__': main()

@@ -75,7 +75,7 @@ printf '\nKlipper Telegram Bot - interactive uninstaller\n'
 info "User: $(id -un)"
 info "Repository: $ROOT"
 info "Printer data: $PRINTER_DATA"
-warn 'Personal configuration, token, and subscriber database are preserved unless explicitly deleted.'
+warn 'Personal configuration and Moonraker namespace data are preserved by default.'
 
 section 1 'Checking prerequisites and installation paths'
 for cmd in systemctl sudo python3; do
@@ -160,8 +160,9 @@ if [[ -d "$VENV" ]]; then
 else
   info 'No Python environment found'
 fi
-info 'Sensitive files are retained by default.'
-if ask 'PERMANENTLY delete Telegram config, token, and subscriber SQLite files?'; then
+info 'Moonraker namespace klipper_telegram is preserved (delete it separately via Moonraker API if desired).'
+info 'Sensitive local files are retained by default.'
+if ask 'PERMANENTLY delete Telegram config, token, and LEGACY SQLite files?'; then
   if ask 'Confirm deletion of Telegram credentials and subscriber data?'; then
     for file in "$CONFIG_FILE" "$TOKEN_FILE" "$DB_FILE" "${DB_FILE}-wal" "${DB_FILE}-shm"; do
       if [[ -f "$file" ]]; then

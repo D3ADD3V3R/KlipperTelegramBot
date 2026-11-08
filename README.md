@@ -1,4 +1,4 @@
-# Klipper Telegram · v0.2.0 (preview)
+# Klipper Telegram · v0.3.0 (preview)
 
 Small read-only Telegram notification service for Moonraker / Klipper, with user pairing and a local systemd service.
 
@@ -9,7 +9,7 @@ Small read-only Telegram notification service for Moonraker / Klipper, with user
 - Single-use 8-character pairing code; default TTL 600 seconds
 - `TELEGRAM_PAIRING_CREATE` and `TELEGRAM_STATUS` G-Code macros
 - Expiration and successful subscriber notifications in Mainsail console
-- SQLite subscriber database and printer UUID
+- Persistent subscriber database, printer UUID and pairing in Moonraker namespace `klipper_telegram`
 - Configurable `[on_printing]`, `[on_paused]`, `[on_complete]`, `[on_cancelled]`, `[on_error]` hooks
 - Read-only `/status`, `/unsubscribe`, `/help`
 - No centralized backend; the bot talks directly to Telegram and Moonraker
@@ -37,7 +37,8 @@ Setup files:
 - `~/printer_data/config/klipper_telegram.token` (secret, chmod 600)
 - `~/printer_data/config/telegram_macros.cfg` (optional)
 - `~/printer_data/config/printer.cfg` includes the macro (optional)
-- `~/printer_data/config/subscribers.db` (local private state)
+- Moonraker namespace `klipper_telegram` (persistent data, managed by Moonraker)
+- `~/printer_data/config/subscribers.db` (legacy database; imported read-only once, never deleted automatically)
 
 ## Quick start
 
@@ -49,7 +50,7 @@ Setup files:
 6. The console should report `Connected to Telegram-User @username` or `User <id>`.
 7. Run `TELEGRAM_STATUS` to see connection/subscriber information.
 
-For SSH: `PYTHONPATH=. python3 -m klipper_telegram --config ~/printer_data/config/klipper_telegram.conf pairing create` (needs the installed environment if `aiohttp` isn't installed). CLI generation uses the same database, but for full console notifications prefer the G-Code macro.
+For SSH: `PYTHONPATH=. python3 -m klipper_telegram --config ~/printer_data/config/klipper_telegram.conf pairing create` (needs the installed environment if `aiohttp` isn't installed). CLI generation uses the same Moonraker namespace, but for full console notifications prefer the G-Code macro.
 
 ## Security
 
@@ -62,14 +63,14 @@ Pairing codes are hashed before storage, single-use and rate-limited per Telegra
 - No end-to-end printer/Moonraker integration tests yet; validate on a spare system before production.
 - Printing events are derived from `print_stats.state` transitions; state changes missed during offline periods cannot be reconstructed.
 - Hook delivery isn't queued across service restarts and uses best-effort network delivery.
-- The daemon and CLI share SQLite but an independently generated CLI code doesn't cause an immediate Mainsail console message.
+- The daemon and CLI share a Moonraker database namespace, but an independently generated CLI code doesn't cause an immediate Mainsail console message.
 - If Moonraker is down when pairing expires, the console message is not retried; the code still expires.
 - Standard Telegram Bot API long-polling: **do not configure a webhook for the same bot**.
 - Moonraker must allow localhost requests (trusted clients) or configure an API key.
 
 ## Updating via Moonraker
 
-Clone using `git clone https://github.com/D3ADD3V3R/KlipperTelegramBot.git` and run `make install`; choose Update Manager registration. Moonraker manages the Git repository and the `klipper-telegram` service, while credentials and SQLite remain under `~/printer_data/config/`. The `dev` channel tracks the latest commit on `main`; create a semantic version tag such as `v0.2.0` before switching to stable releases.
+Clone using `git clone https://github.com/D3ADD3V3R/KlipperTelegramBot.git` and run `make install`; choose Update Manager registration. Moonraker manages the Git repository and the `klipper-telegram` service, while credentials remain under `~/printer_data/config/`; subscribers and pairing data live in Moonraker. The `dev` channel tracks the latest commit on `main`; create a semantic version tag such as `v0.2.0` before switching to stable releases.
 
 ## License
 
@@ -89,4 +90,31 @@ Run from the repository as the ordinary printer user (do not use `sudo make unin
 make uninstall
 ```
 
-The interactive uninstaller stops/disables/removes the `klipper-telegram` systemd unit. It optionally removes Klipper macros, the Moonraker Update Manager entry and `moonraker.asvc` authorization, and the dedicated Python virtual environment. **Configuration, BotFather token, subscriber database and Git repository are preserved by default.** Existing configuration files are backed up before modification. If you remove Moonraker or Klipper integrations, restart the corresponding service afterward.
+The interactive uninstaller stops/disables/removes the `klipper-telegram` systemd unit. It optionally removes Klipper macros, the Moonraker Update Manager entry and `moonraker.asvc` authorization, and the dedicated Python virtual environment. **Configuration, BotFather token, Moonraker namespace, legacy subscriber database and Git repository are preserved by default.** Existing configuration files are backed up before modification. If you remove Moonraker or Klipper integrations, restart the corresponding service afterward.
+
+## Migrating from v0.2.0
+
+Stop the previous `klipper-telegram` service before upgrading. On the first startup,
+v0.3.0 reads the old `~/printer_data/config/subscribers.db` (if it exists),
+imports existing subscriber records and the printer ID into Moonraker's
+`klipper_telegram` namespace and sets a `legacy_migrated` flag. The original
+file is **never deleted**. Do not remove it until you have checked the imported
+subscriptions and made a backup.
+
+Inspect data (from the printer host):
+
+```bash
+curl -s 'http://127.0.0.1:7125/server/database/item?namespace=klipper_telegram'
+```
+
+Moonraker authorization must permit the request. The namespace is not a secrets
+vault: trusted Moonraker clients can read its values. The Telegram token remains
+in its protected local file. Pairing codes are only stored as SHA-256 hashes.
+
+**Preview limitation:** v0.3.0 converts the persistence layer to Moonraker's
+public database API, but still uses the existing agent WebSocket for incoming
+remote G-Code methods. While `pymoonraker` 0.1.0 supports the full set of
+database methods, its documented client does not expose handling for server-
+initiated agent methods. Avoiding a second competing WebSocket client takes
+precedence over replacing that remaining adapter. Live hardware integration
+tests are still required before re-enabling the service for printing.

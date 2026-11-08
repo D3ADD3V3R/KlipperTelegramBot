@@ -6,19 +6,20 @@ import time
 from pathlib import Path
 
 import aiohttp
-from .core import Store, load_config, render
+from .core import load_config, render
+from .store import MoonrakerStore
 
 LOG = logging.getLogger('klipper-telegram')
-VERSION = '0.2.0'
+VERSION = '0.3.0'
 
 
 class Service:
     def __init__(self, config_path):
         self.cfg = load_config(config_path)
-        self.store = Store(str(Path(config_path).expanduser().parent / 'subscribers.db'))
         self.printer = self.cfg.get('general', 'printer_name', fallback='Printer')
         self.moonraker = self.cfg.get('moonraker', 'url', fallback='http://127.0.0.1:7125').rstrip('/')
         self.api_key = self.cfg.get('moonraker', 'api_key', fallback='').strip()
+        self.store = MoonrakerStore(self.moonraker, self.api_key)
         self.token_file = Path(self.cfg.get('telegram', 'token_file')).expanduser()
         self.token = self.token_file.read_text(encoding='utf-8').strip() if self.token_file.is_file() else ''
         self.bot_name = ''
@@ -78,11 +79,11 @@ class Service:
         return render(template.strip().strip('\"'), {'printer':self.printer, 'bot':self.bot_name, **(values or {})})
 
     async def pairing_created(self):
-        if not self.store.consume_console_arm():
+        if not await self.store.consume_console_arm():
             await self.console('Telegram pairing DENIED: authorize locally using klipper-telegram pairing arm')
             LOG.warning('Console pairing request denied: no valid local authorization')
             return
-        code, _ = self.store.generate(self.cfg.getint('pairing','expiration_seconds',fallback=600))
+        code, _ = await self.store.generate(self.cfg.getint('pairing','expiration_seconds',fallback=600))
         text = self.pair_console_template('created', 'Telegram pairing code: {code}; bot @{bot}', {'code':code, 'bot':self.bot_name or 'unknown'})
         if text: await self.console(text)
         LOG.info('Pairing code generated (content not logged)')
@@ -140,7 +141,7 @@ class Service:
             # Telegram deep links use /start CODE.
             cmd='/subscribe'
         if cmd=='/subscribe':
-            ok, reason=self.store.claim(arg,user_id,chat_id,username,
+            ok, reason=await self.store.claim(arg,user_id,chat_id,username,
                 self.cfg.getint('pairing','max_attempts',fallback=5))
             if ok:
                 await self.send(chat_id,f'✅ Subscribed to {self.printer}.')
@@ -155,11 +156,11 @@ class Service:
         if cmd in ('/start','/help'):
             await self.send(chat_id,'Use /subscribe CODE to connect. /status, /unsubscribe after pairing.')
             return
-        if not self.store.is_subscribed(user_id,chat_id):
+        if not await self.store.is_subscribed(user_id,chat_id):
             await self.send(chat_id,'Unauthorized. Request a pairing code from the printer administrator.')
             return
         if cmd=='/unsubscribe':
-            self.store.unsubscribe(user_id)
+            await self.store.unsubscribe(user_id)
             await self.send(chat_id,'Subscription removed.')
         elif cmd=='/status':
             state=self.state.get('state','unknown')
@@ -171,7 +172,7 @@ class Service:
     async def sender_loop(self):
         while True:
             message=await self.queue.get()
-            for subscriber in self.store.subscribers():
+            for subscriber in await self.store.subscribers():
                 try:
                     await self.send(subscriber['chat_id'],message)
                 except asyncio.CancelledError:
@@ -182,10 +183,10 @@ class Service:
 
     async def expiration_loop(self):
         while True:
-            if self.store.expire():
+            if await self.store.expire():
                 text=self.pair_console_template('expired', 'Telegram pairing code expired; no subscriber connected')
                 if text: await self.console(text)
-            await asyncio.sleep(1)
+            await asyncio.sleep(5)
 
     async def update_state(self, payload, bootstrap=False):
         stats=payload.get('print_stats',{})
@@ -228,17 +229,19 @@ class Service:
                         if method=='klipper_telegram_pairing_create':
                             await self.pairing_created()
                         elif method=='klipper_telegram_status':
-                            await self.console(f'Telegram: @{self.bot_name or "not configured"}; subscribers: {len(self.store.subscribers())}')
+                            await self.console(f'Telegram: @{self.bot_name or "not configured"}; subscribers: {len(await self.store.subscribers())}')
                         elif method=='notify_status_update':
                             await self.update_state((data.get('params') or [{}])[0])
                         elif method=='notify_klippy_ready':
                             await self.rpc('printer.objects.subscribe',{'objects':{'print_stats':None,'display_status':['progress']}})
-                        elif data.get('result',{}).__class__ is dict and isinstance(data['result'],dict) and 'status' in data['result']:
+                        elif 'error' in data:
+                            LOG.warning('Moonraker RPC error id=%s: %s', data.get('id'), data['error'])
+                        elif isinstance(data.get('result'), dict) and 'status' in data['result']:
                             await self.update_state(data['result']['status'],bootstrap=True)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                LOG.warning('Moonraker connection issue: %s',exc)
+                LOG.exception('Moonraker connection issue: %s',exc)
             finally:
                 self.ws=None
                 for fut in self.pending_requests.values():
@@ -249,4 +252,8 @@ class Service:
 
     async def run(self):
         async with aiohttp.ClientSession() as self.session:
+            self.store.session = self.session
+            legacy_path = Path(self.cfg.get('general', 'legacy_sqlite', fallback=str(Path.home() / 'printer_data/config/subscribers.db'))).expanduser()
+            await self.store.migrate_legacy(legacy_path)
+            await self.store.identity()
             await asyncio.gather(self.moonraker_loop(),self.telegram_loop(),self.sender_loop(),self.expiration_loop())
