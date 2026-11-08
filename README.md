@@ -39,3 +39,21 @@ Bot token is stored only in a local chmod-600 file. Pairing is gated by CLI `kli
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Extended `/status` output
+
+`/status` now queries live Moonraker printer objects when requested. During a
+print it displays filename, active print duration, estimated remaining time,
+current/total layer, and progress. After completion it displays filename,
+total job duration (including paused time), and filament used (meters).
+
+Remaining time is **estimated**, not a native Klipper `time_to_finish` field:
+Moonraker G-code file metadata `estimated_time` is combined with current print
+progress. When metadata, slicer layer commands, or another value is unavailable,
+`–` is displayed. For layer counts, configure the slicer to send
+`SET_PRINT_STATS_INFO TOTAL_LAYER=...` and `CURRENT_LAYER=...` using its own
+placeholder syntax. Existing hook messages are unchanged.
+
+Only the `klipper-telegram` service needs restarting after updating; no Klipper
+restart is needed. Restarting the standalone service may cause a brief gap in
+Telegram notifications but normally does not interrupt an ongoing print.

@@ -77,9 +77,9 @@ class TelegramClient:
         argument = args[1].strip() if len(args) > 1 else ''
         await self.owner.handle_command(command, argument, update.effective_user, update.effective_chat.id)
 
-    async def send(self, chat_id, text):
+    async def send(self, chat_id, text, parse_mode=None):
         if self.application:
-            await self.application.bot.send_message(chat_id=int(chat_id), text=text[:4096])
+            await self.application.bot.send_message(chat_id=int(chat_id), text=text[:4096], parse_mode=parse_mode)
 
     async def photo(self, chat_id, data, caption):
         if self.application:

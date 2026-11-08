@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 import aiohttp
 from .camera import CameraError, camera_list, select_camera, fetch_snapshot
 from .core import load_config, render
+from .status_format import status_message
 from .store import MoonrakerStore
 from .telegram_client import TelegramClient
 
@@ -137,8 +138,32 @@ class Service:
             await self.telegram.unregister_subscriber(chat_id)
             await self.telegram.send(chat_id, 'Subscription removed.')
         elif cmd == '/status':
+            # Query current values on demand so /status isn't tied to stale events.
+            stats = dict(self.state)
+            display, vsd = {}, {}
+            estimated_time = None
+            try:
+                result = await self.rpc('printer.objects.query', {'objects': {
+                    'print_stats': None, 'display_status': ['progress'],
+                    'virtual_sdcard': ['progress']}}, wait=True)
+                status = (result or {}).get('status', {})
+                stats = status.get('print_stats') or stats
+                display = status.get('display_status') or {}
+                vsd = status.get('virtual_sdcard') or {}
+                if stats.get('state') == 'printing' and stats.get('filename'):
+                    try:
+                        metadata = await self.rpc('server.files.metadata',
+                            {'filename': stats['filename']}, wait=True)
+                        estimated_time = (metadata or {}).get('estimated_time')
+                    except (ConnectionError, RuntimeError, asyncio.TimeoutError, ValueError, TypeError):
+                        LOG.debug('File metadata unavailable for /status')
+            except (ConnectionError, RuntimeError, asyncio.TimeoutError, ValueError, TypeError):
+                LOG.debug('Live printer query unavailable for /status')
+                if 'progress' in self.state:
+                    display['progress'] = self.state['progress'] / 100
             await self.telegram.send(chat_id,
-                f'{self.printer}: {self.state.get("state", "unknown")}\n{self.state.get("filename", "")}')
+                status_message(self.printer, stats, display, vsd, estimated_time),
+                parse_mode='HTML')
         elif cmd == '/notifications':
             enabled = [s for s in self.cfg.sections() if s.startswith('on_') and
                        not s.startswith('on_pairing_') and self.cfg.getboolean(s, 'enabled', fallback=False)]
