@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "klipper-telegram-bot"
+version = "0.3.0"
+description = "Telegram notifications and pairing for Klipper/Moonraker"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = ["aiohttp>=3.9,<4"]
+
+[project.scripts]
+klipper-telegram = "klipper_telegram.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["klipper_telegram*"]

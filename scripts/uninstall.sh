@@ -106,14 +106,7 @@ section 3 'Optional Klipper G-Code macros removal'
 if ask 'Remove telegram_macros.cfg and its printer.cfg include?'; then
   if [[ -f "$PRINTER_CONF" ]] && grep -Eq '^[[:space:]]*\[include[[:space:]]+telegram_macros\.cfg\][[:space:]]*$' "$PRINTER_CONF"; then
     backup "$PRINTER_CONF"
-    python3 - "$PRINTER_CONF" <<'PY'
-from pathlib import Path
-import re, sys
-p = Path(sys.argv[1])
-lines = p.read_text(encoding='utf-8').splitlines(keepends=True)
-rx = re.compile(r'^\s*\[include\s+telegram_macros\.cfg\]\s*$')
-p.write_text(''.join(x for x in lines if not rx.fullmatch(x.rstrip('\r\n'))), encoding='utf-8')
-PY
+    python3 "$ROOT/scripts/update_klipper_include.py" remove "$PRINTER_CONF"
     ok 'Removed [include telegram_macros.cfg] from printer.cfg'
   fi
   if [[ -f "$MACROS_FILE" ]]; then
@@ -148,6 +141,14 @@ else
 fi
 
 section 5 'Optional environment and private data cleanup'
+GLOBAL_CLI='/usr/local/bin/klipper-telegram'
+if [[ -L "$GLOBAL_CLI" ]] && [[ "$(readlink "$GLOBAL_CLI")" == "$VENV/bin/klipper-telegram" ]]; then
+  info "Removing managed global CLI symlink: $GLOBAL_CLI"
+  sudo rm -- "$GLOBAL_CLI"
+  ok 'CLI symlink removed'
+else
+  info 'No CLI symlink managed by this installation found'
+fi
 if [[ -d "$VENV" ]]; then
   if ask "Remove dedicated Python environment ($VENV)?"; then
     case "$VENV" in

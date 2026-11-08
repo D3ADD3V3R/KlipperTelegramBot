@@ -20,6 +20,7 @@ STEPS=7
 SERVICE_STATE='not installed'
 UPDATE_STATE='not configured'
 MACRO_STATE='not configured'
+CLI_STATE='not configured'
 CONFIG_STATE='not created'
 TOKEN_STATE='not configured'
 
@@ -70,7 +71,29 @@ info 'Upgrading pip (package installation output follows).'
 "$VENV/bin/python" -m pip install --upgrade pip
 info 'Installing application dependencies (package installation output follows).'
 "$VENV/bin/python" -m pip install -r "$ROOT/requirements.txt"
-ok 'Python environment and dependencies ready.'
+info 'Installing klipper-telegram package and CLI entry point into virtual environment.'
+"$VENV/bin/python" -m pip install -e "$ROOT"
+if [[ ! -x "$VENV/bin/klipper-telegram" ]]; then
+  warn 'CLI installation failed: virtualenv executable missing.'
+  exit 1
+fi
+ok "CLI installed: $VENV/bin/klipper-telegram"
+CLI_STATE="$VENV/bin/klipper-telegram"
+GLOBAL_CLI='/usr/local/bin/klipper-telegram'
+if [[ -L "$GLOBAL_CLI" ]]; then
+  if [[ "$(readlink -f "$GLOBAL_CLI")" == "$(readlink -f "$VENV/bin/klipper-telegram")" ]]; then
+    ok 'Existing global CLI symlink is correct.'
+  else
+    warn "Global command $GLOBAL_CLI belongs to another installation; leaving unchanged."
+  fi
+elif [[ -e "$GLOBAL_CLI" ]]; then
+  warn "Global command $GLOBAL_CLI already exists; leaving unchanged."
+else
+  info "Registering global CLI symlink: $GLOBAL_CLI"
+  sudo ln -s "$VENV/bin/klipper-telegram" "$GLOBAL_CLI"
+  ok 'Global klipper-telegram command registered.'
+fi
+ok 'Python environment and dependencies ready.' 
 
 section 3 'Preparing local configuration and Telegram credentials'
 if [[ -f "$CONFIG_FILE" ]]; then
@@ -116,10 +139,12 @@ else
 fi
 if [[ -f "$MACROS_FILE" && -f "$KLIPPER_CONF" ]]; then
   if grep -Eq '^[[:space:]]*\[include[[:space:]]+telegram_macros\.cfg\][[:space:]]*$' "$KLIPPER_CONF"; then
-    ok 'printer.cfg already includes telegram_macros.cfg.'
-  elif ask 'Add [include telegram_macros.cfg] to printer.cfg?'; then
-    printf '\n[include telegram_macros.cfg]\n' >> "$KLIPPER_CONF"
-    ok 'Include added to printer.cfg. Klipper RESTART is required.'
+    info 'Checking existing include position (and repairing if necessary).'
+    result="$(python3 "$ROOT/scripts/update_klipper_include.py" ensure "$KLIPPER_CONF")"
+    ok "Klipper include verified: $result"
+  elif ask 'Add [include telegram_macros.cfg] to printer.cfg before SAVE_CONFIG?'; then
+    result="$(python3 "$ROOT/scripts/update_klipper_include.py" ensure "$KLIPPER_CONF")"
+    ok "Klipper include installed: $result; RESTART required."
   else
     warn 'Macro file exists but is not included automatically. Add the include manually when ready.'
   fi
@@ -172,20 +197,32 @@ else
 fi
 
 section 6 'Optional Moonraker Update Manager integration'
-if ask 'Configure Moonraker Update Manager?'; then
+UPDATE_SECTION_PRESENT=false
+if [[ -f "$MOONRAKER_CONF" ]] && grep -Eq '^[[:space:]]*\[update_manager klipper-telegram\][[:space:]]*$' "$MOONRAKER_CONF"; then
+  UPDATE_SECTION_PRESENT=true
+fi
+if [[ "$UPDATE_SECTION_PRESENT" == true ]]; then
+  info 'Found existing [update_manager klipper-telegram] entry.'
+  UPDATE_STATE='already configured; verify Moonraker reload'
+fi
+if [[ "$UPDATE_SECTION_PRESENT" == true ]] || ask 'Configure Moonraker Update Manager?'; then
   if [[ ! -d "$ROOT/.git" ]]; then
-    warn 'Skipping: installation folder is not a Git checkout.'
+    warn 'Update Manager requires a real Git checkout (.git directory). ZIP extraction is not suitable for git_repo.'
   elif [[ ! -f "$MOONRAKER_CONF" ]]; then
-    warn "Skipping: $MOONRAKER_CONF does not exist."
-  elif grep -Eq '^[[:space:]]*\[update_manager klipper-telegram\][[:space:]]*$' "$MOONRAKER_CONF"; then
-    ok 'Existing [update_manager klipper-telegram] section preserved.'
-    UPDATE_STATE='already configured'
+    warn "Moonraker configuration not found: $MOONRAKER_CONF"
   else
     ORIGIN="$(git -C "$ROOT" remote get-url origin 2>/dev/null || true)"
-    info "Detected Git remote: ${ORIGIN:-none}"
-    case "$ORIGIN" in
-      https://github.com/D3ADD3V3R/KlipperTelegramBot|https://github.com/D3ADD3V3R/KlipperTelegramBot.git|git@github.com:D3ADD3V3R/KlipperTelegramBot.git)
-        cat >> "$MOONRAKER_CONF" <<EOF
+    info "Git origin: ${ORIGIN:-none}"
+    info "Git branch: $(git -C "$ROOT" branch --show-current 2>/dev/null || echo unknown)"
+    if [[ "$UPDATE_SECTION_PRESENT" == true ]]; then
+      ok 'Existing update_manager entry preserved (no duplicates).'
+      info 'Confirm its path, origin and branch match this checkout:'
+      sed -n '/^\[update_manager klipper-telegram\]/,/^\[/{ /^\[update_manager klipper-telegram\]/p; /^\[update_manager klipper-telegram\]/!{ /^\[/!p; }; }' "$MOONRAKER_CONF" || true
+    else
+      case "$ORIGIN" in
+        https://github.com/D3ADD3V3R/KlipperTelegramBot|https://github.com/D3ADD3V3R/KlipperTelegramBot.git|git@github.com:D3ADD3V3R/KlipperTelegramBot.git)
+          cp -p "$MOONRAKER_CONF" "${MOONRAKER_CONF}.klipper-telegram-install.bak"
+          cat >> "$MOONRAKER_CONF" <<EOF
 
 [update_manager klipper-telegram]
 type: git_repo
@@ -197,18 +234,38 @@ virtualenv: $VENV
 requirements: requirements.txt
 managed_services: klipper-telegram
 EOF
-        ASVC="$PRINTER_DATA/moonraker.asvc"
+          ok 'Update Manager configuration appended (backup created).'
+          UPDATE_STATE='configured; restart Moonraker'
+          ;;
+        *) warn 'Git origin does not match expected public GitHub repository; skipping new Update Manager entry.' ;;
+      esac
+    fi
+    if [[ "$UPDATE_SECTION_PRESENT" == true || "$UPDATE_STATE" == 'configured; restart Moonraker' ]]; then
+      ASVC="$PRINTER_DATA/moonraker.asvc"
+      if [[ ! -f "$ASVC" ]]; then
         touch "$ASVC"
-        grep -Fxq 'klipper-telegram' "$ASVC" || printf '%s\n' 'klipper-telegram' >> "$ASVC"
-        ok "Added Update Manager entry to $MOONRAKER_CONF"
-        ok "Service authorization ensured in $ASVC"
-        UPDATE_STATE='configured; Moonraker restart needed'
-        ;;
-      *) warn 'Skipping: remote does not match official repository. No existing files modified.' ;;
-    esac
+      fi
+      if ! grep -Fxq 'klipper-telegram' "$ASVC"; then
+        cp -p "$ASVC" "${ASVC}.klipper-telegram-install.bak"
+        printf '%s\n' 'klipper-telegram' >> "$ASVC"
+        ok 'Added klipper-telegram to moonraker.asvc (backup created).'
+        UPDATE_STATE='configured; restart Moonraker'
+      else
+        ok 'Service authorization in moonraker.asvc already present.'
+      fi
+      info 'Moonraker must restart to display a newly installed Update Manager component.'
+      if ask 'Restart Moonraker now to refresh Update Manager?'; then
+        sudo systemctl restart moonraker
+        ok 'Moonraker restarted.'
+        UPDATE_STATE='configured; Moonraker restarted'
+      else
+        warn 'Moonraker restart deferred. Update Manager may not show until restarted.'
+      fi
+      info 'If still absent, inspect: journalctl -u moonraker -n 80 --no-pager'
+    fi
   fi
 else
-  info 'Moonraker Update Manager setup skipped by user.'
+  info 'Moonraker Update Manager setup skipped.'
 fi
 
 section 7 'Installation summary'
@@ -217,11 +274,14 @@ printf '  Configuration:     %s\n' "$CONFIG_STATE"
 printf '  Telegram token:    %s\n' "$TOKEN_STATE"
 printf '  Klipper macros:    %s\n' "$MACRO_STATE"
 printf '  Service:           %s\n' "$SERVICE_STATE"
+printf '  CLI:               %s\n' "$CLI_STATE"
 printf '  Update Manager:    %s\n' "$UPDATE_STATE"
 printf '\nNext commands:\n'
 printf '  systemctl status klipper-telegram --no-pager\n'
 printf '  journalctl -u klipper-telegram -n 50 --no-pager\n'
-if [[ "$UPDATE_STATE" == 'configured; Moonraker restart needed' ]]; then
+printf '  klipper-telegram --help\n'
+printf '  curl -fsS http://127.0.0.1:7125/server/update/status\n'
+if [[ "$UPDATE_STATE" == *'restart Moonraker'* || "$UPDATE_STATE" == 'already configured; verify Moonraker reload' ]]; then
   info 'Restart Moonraker to load the new Update Manager configuration.'
 fi
 if [[ "$MACRO_STATE" != 'not configured' ]]; then

@@ -27,7 +27,7 @@ cd ~/klipper-telegram
 make install
 ```
 
-The installer prints seven numbered phases, reports each action and skip, shows the systemd service state, and finishes with an installation summary. It asks whether to create the default `.conf`, add the Telegram token, install G-Code macros and configure the Moonraker `git_repo` update manager. The public GitHub `origin` must already be present for update-manager setup. It registers and enables a `klipper-telegram` systemd service. Re-running the installer preserves local configuration files.
+The installer installs an editable Python package and the `klipper-telegram` CLI into the virtual environment, and adds a guarded global symlink under `/usr/local/bin`. It prints seven numbered phases, reports each action and skip, shows the systemd service state, and finishes with an installation summary. It asks whether to create the default `.conf`, add the Telegram token, install G-Code macros and configure the Moonraker `git_repo` update manager. The public GitHub `origin` must already be present for update-manager setup. It registers and enables a `klipper-telegram` systemd service. Re-running the installer preserves local configuration files.
 
 **Do not run `sudo make install`.** The installer only elevates the systemd unit registration. Dependencies install into `~/klipper-telegram-env`.
 
@@ -45,7 +45,7 @@ Setup files:
 1. Create a bot using Telegram BotFather and set its token in the installer or the token file.
 2. Run `sudo systemctl restart klipper-telegram`.
 3. Restart Klipper if you added `telegram_macros.cfg`.
-4. On the printer host, run `~/klipper-telegram-env/bin/python -m klipper_telegram --config ~/printer_data/config/klipper_telegram.conf pairing arm` from the repository directory (or `PYTHONPATH` pointing to it). Within 60 seconds run `TELEGRAM_PAIRING_CREATE` from Mainsail. The authorization is single-use.
+4. On the printer host, run `klipper-telegram pairing arm` (or `~/klipper-telegram-env/bin/klipper-telegram pairing arm`). Within 60 seconds run `TELEGRAM_PAIRING_CREATE` from Mainsail. The authorization is single-use.
 5. In a **private** chat with the bot, run `/subscribe ABCD-EFGH` replacing the code.
 6. The console should report `Connected to Telegram-User @username` or `User <id>`.
 7. Run `TELEGRAM_STATUS` to see connection/subscriber information.
@@ -118,3 +118,12 @@ database methods, its documented client does not expose handling for server-
 initiated agent methods. Avoiding a second competing WebSocket client takes
 precedence over replacing that remaining adapter. Live hardware integration
 tests are still required before re-enabling the service for printing.
+
+## CLI and Update Manager troubleshooting (v0.3.0 installer fix)
+
+- Test the CLI with `klipper-telegram --help` or `~/klipper-telegram-env/bin/klipper-telegram --help`.
+- The installer uses a guarded symlink to `/usr/local/bin/klipper-telegram` and does not replace foreign binaries.
+- An Update Manager `git_repo` requires a real Git checkout, not an unpacked ZIP directory.
+- The installer preserves existing `[update_manager klipper-telegram]` configuration, ensures service authorization in `~/printer_data/moonraker.asvc`, and offers to restart Moonraker.
+- If updates remain absent, inspect `/server/update/status` and `journalctl -u moonraker -n 80`.
+- Uninstall removes only an installer-owned global CLI symlink, not a foreign command.
